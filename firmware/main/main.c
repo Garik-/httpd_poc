@@ -2,6 +2,7 @@
 #include "err.h"
 #include "esp_check.h"
 #include "esp_event.h"
+#include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_wifi.h"
@@ -23,6 +24,7 @@ static closer_handle_t s_closer = NULL;
 #define DEFER(fn) CLOSER_DEFER(s_closer, (void *)fn)
 
 static esp_netif_t *s_sta_netif = NULL;
+static httpd_handle_t s_server = NULL;
 
 static esp_err_t gpio_init() {
     gpio_config_t io_conf = {};
@@ -109,13 +111,57 @@ static esp_err_t wifi_connect() {
     return esp_wifi_connect();
 }
 
+static esp_err_t root_get_handler(httpd_req_t *req) {
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_set_hdr(req, "Connection", "close");
+
+    return httpd_resp_sendstr(req, "Hello from ESP32");
+}
+
+static esp_err_t stop_webserver() {
+    ESP_LOGI(TAG, "stopping webserver");
+    ESP_RETURN_ON_ERROR(httpd_stop(s_server), TAG, "httpd_stop failed");
+    s_server = NULL;
+    return ESP_OK;
+}
+
+static esp_err_t start_webserver() {
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+
+    config.server_port = 8001;
+
+    config.lru_purge_enable = true;
+    config.max_open_sockets = 4;
+
+    config.recv_wait_timeout = 5;
+    config.recv_wait_timeout = 5;
+
+    config.keep_alive_enable = false;
+
+    config.stack_size = 4096;
+    config.max_uri_handlers = 8;
+
+    config.task_priority = tskIDLE_PRIORITY + 2;
+
+    ESP_LOGI(TAG, "starting server on port: '%d'", config.server_port);
+    ESP_RETURN_ON_ERROR(httpd_start(&s_server, &config), TAG, "httpd_start failed");
+    DEFER(stop_webserver);
+
+    static const httpd_uri_t root_uri = {.uri = "/", .method = HTTP_GET, .handler = root_get_handler};
+
+    httpd_register_uri_handler(s_server, &root_uri);
+
+    return ESP_OK;
+}
+
 static esp_err_t app_logic() {
     ESP_RETURN_ON_ERROR(gpio_init(), TAG, "GPIO init failed");
     ESP_RETURN_ON_ERROR(nvs_init(), TAG, "NVS init failed");
     ESP_RETURN_ON_ERROR(wifi_init(), TAG, "WiFi init failed");
     ESP_RETURN_ON_ERROR(wifi_connect(), TAG, "WiFi connect failed");
+    ESP_RETURN_ON_ERROR(start_webserver(), TAG, "start webserver failed");
 
-    return blink_task();
+    return blink_task(); // TODO: need graceful shutdown
 }
 
 void app_main(void) {
