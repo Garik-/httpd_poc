@@ -124,8 +124,10 @@ esp_err_t closer_create(closer_handle_t *out) {
 }
 
 void closer_destroy(closer_handle_t h) {
-    if (unlikely(!h))
+    if (unlikely(!h)) {
+        ESP_LOGW(TAG, "closer_destroy called with NULL handle");
         return;
+    }
 
     closer_close(h);
     free(h);

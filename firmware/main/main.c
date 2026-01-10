@@ -27,7 +27,8 @@ static closer_handle_t s_closer = NULL;
 static esp_netif_t *s_sta_netif = NULL;
 static httpd_handle_t s_server = NULL;
 
-static char s_etag[24];
+#define ETAG_LEN 24
+static char s_etag[ETAG_LEN];
 
 static esp_err_t gpio_init() {
     gpio_config_t io_conf = {};
@@ -49,20 +50,28 @@ static esp_err_t blink_task() {
     return ESP_OK;
 }
 
-static esp_err_t delete_default_widi_driver_and_handlers() {
-    esp_err_t err = esp_wifi_clear_default_wifi_driver_and_handlers(s_sta_netif);
-    if (err == ESP_OK) {
-        s_sta_netif = NULL;
+static esp_err_t delete_default_wifi_driver_and_handlers() {
+    if (unlikely(s_sta_netif == NULL)) {
+        return ESP_OK;
     }
 
-    return err;
+    return esp_wifi_clear_default_wifi_driver_and_handlers(s_sta_netif);
+}
+
+static void sta_netif_destroy() {
+    if (unlikely(s_sta_netif == NULL)) {
+        return;
+    }
+
+    esp_netif_destroy(s_sta_netif);
+    s_sta_netif = NULL;
 }
 
 static esp_err_t wifi_init() {
     ESP_LOGI(TAG, "wifi_init");
 
     ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "esp_netif_init failed");
-    DEFER(esp_netif_destroy);
+    DEFER(esp_netif_deinit);
 
     ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "esp_event_loop_create_default failed");
     DEFER(esp_event_loop_delete_default);
@@ -73,8 +82,15 @@ static esp_err_t wifi_init() {
 
     esp_netif_inherent_config_t esp_netif_config = ESP_NETIF_INHERENT_DEFAULT_WIFI_STA();
     s_sta_netif = esp_netif_create_wifi(WIFI_IF_STA, &esp_netif_config);
-    esp_wifi_set_default_wifi_sta_handlers();
-    DEFER(delete_default_widi_driver_and_handlers);
+
+    if (unlikely(s_sta_netif == NULL)) {
+        ESP_LOGE(TAG, "esp_netif_create_wifi failed");
+        return ESP_FAIL;
+    }
+    DEFER(sta_netif_destroy);
+
+    ESP_RETURN_ON_ERROR(esp_wifi_set_default_wifi_sta_handlers(), TAG, "esp_wifi_set_default_wifi_sta_handlers failed");
+    DEFER(delete_default_wifi_driver_and_handlers);
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_RAM), TAG, "esp_wifi_set_storage failed");
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "esp_wifi_set_mode failed");
@@ -114,12 +130,26 @@ static esp_err_t wifi_connect() {
     return esp_wifi_connect();
 }
 
-static void make_etag(char *etag, size_t etag_len) {
-    const esp_app_desc_t *desc = esp_app_get_description();
+static esp_err_t make_etag(char *etag, size_t etag_len) {
+    if (unlikely(!etag || etag_len < 20)) {
+        return ESP_ERR_INVALID_ARG;
+    }
 
-    snprintf(etag, etag_len, "\"%02x%02x%02x%02x%02x%02x%02x%02x\"", desc->app_elf_sha256[0], desc->app_elf_sha256[1],
-             desc->app_elf_sha256[2], desc->app_elf_sha256[3], desc->app_elf_sha256[4], desc->app_elf_sha256[5],
-             desc->app_elf_sha256[6], desc->app_elf_sha256[7]);
+    const esp_app_desc_t *desc = esp_app_get_description();
+    if (unlikely(!desc)) {
+        return ESP_FAIL;
+    }
+
+    int written =
+        snprintf(etag, etag_len, "\"%02x%02x%02x%02x%02x%02x%02x%02x\"", desc->app_elf_sha256[0],
+                 desc->app_elf_sha256[1], desc->app_elf_sha256[2], desc->app_elf_sha256[3], desc->app_elf_sha256[4],
+                 desc->app_elf_sha256[5], desc->app_elf_sha256[6], desc->app_elf_sha256[7]);
+
+    if (unlikely((written < 0 || (size_t)written >= etag_len))) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    return ESP_OK;
 }
 
 //  Handler to redirect incoming GET request for /index.html to /
@@ -135,9 +165,9 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "ETag", s_etag);
 
     // Проверяем If-None-Match
-    char if_none_match[32];
+    char if_none_match[ETAG_LEN];
     if (httpd_req_get_hdr_value_str(req, "If-None-Match", if_none_match, sizeof(if_none_match)) == ESP_OK) {
-        if (strcmp(if_none_match, s_etag) == 0) {
+        if (strncmp(if_none_match, s_etag, ETAG_LEN - 1) == 0) {
             httpd_resp_set_status(req, "304 Not Modified");
             return httpd_resp_send(req, NULL, 0);
         }
@@ -175,7 +205,7 @@ static esp_err_t start_webserver() {
     config.max_open_sockets = 4;
 
     config.recv_wait_timeout = 5;
-    config.recv_wait_timeout = 5;
+    config.send_wait_timeout = 5;
 
     config.keep_alive_enable = false;
 
@@ -200,6 +230,9 @@ static esp_err_t start_webserver() {
 }
 
 static esp_err_t app_logic() {
+    ESP_RETURN_ON_ERROR(make_etag(s_etag, sizeof(s_etag)), TAG, "make_etag failed");
+    ESP_LOGI(TAG, "ETag: %s", s_etag);
+
     ESP_RETURN_ON_ERROR(gpio_init(), TAG, "GPIO init failed");
     ESP_RETURN_ON_ERROR(nvs_init(), TAG, "NVS init failed");
     ESP_RETURN_ON_ERROR(wifi_init(), TAG, "WiFi init failed");
@@ -211,9 +244,6 @@ static esp_err_t app_logic() {
 
 void app_main(void) {
     ESP_ERROR_CHECK(closer_create(&s_closer));
-
-    make_etag(s_etag, sizeof(s_etag));
-    ESP_LOGI(TAG, "ETag: %s", s_etag);
 
     app_logic();
 
