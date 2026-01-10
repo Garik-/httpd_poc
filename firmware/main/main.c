@@ -56,14 +56,14 @@ static esp_err_t delete_default_widi_driver_and_handlers() {
 static esp_err_t wifi_init() {
     ESP_LOGI(TAG, "wifi_init");
 
-    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "esp_netif_init failed");
     DEFER(esp_netif_destroy);
 
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "esp_event_loop_create_default failed");
     DEFER(esp_event_loop_delete_default);
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), TAG, "esp_wifi_init failed");
     DEFER(esp_wifi_deinit);
 
     esp_netif_inherent_config_t esp_netif_config = ESP_NETIF_INHERENT_DEFAULT_WIFI_STA();
@@ -71,14 +71,14 @@ static esp_err_t wifi_init() {
     esp_wifi_set_default_wifi_sta_handlers();
     DEFER(delete_default_widi_driver_and_handlers);
 
-    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_RAM), TAG, "esp_wifi_set_storage failed");
+    ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "esp_wifi_set_mode failed");
 
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "esp_wifi_start failed");
     DEFER(esp_wifi_stop);
 
     int8_t pwr;
-    ESP_ERROR_CHECK(esp_wifi_get_max_tx_power(&pwr));
+    ESP_RETURN_ON_ERROR(esp_wifi_get_max_tx_power(&pwr), TAG, "esp_wifi_get_max_tx_power failed");
     ESP_LOGI(TAG, "WiFi TX power = %.2f dBm, pwr=%d", pwr * 0.25, pwr);
 
     return ESP_OK;
@@ -87,7 +87,7 @@ static esp_err_t wifi_init() {
 static esp_err_t nvs_init() {
     esp_err_t ret = nvs_flash_init();
     if (unlikely(ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
+        ESP_RETURN_ON_ERROR(nvs_flash_erase(), TAG, "nvs_flash_erase failed");
         ret = nvs_flash_init();
     }
 
