@@ -1,5 +1,6 @@
 #include "driver/gpio.h"
 #include "err.h"
+#include "esp_app_desc.h"
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_http_server.h"
@@ -25,6 +26,8 @@ static closer_handle_t s_closer = NULL;
 
 static esp_netif_t *s_sta_netif = NULL;
 static httpd_handle_t s_server = NULL;
+
+static char s_etag[24];
 
 static esp_err_t gpio_init() {
     gpio_config_t io_conf = {};
@@ -111,11 +114,49 @@ static esp_err_t wifi_connect() {
     return esp_wifi_connect();
 }
 
-static esp_err_t root_get_handler(httpd_req_t *req) {
-    httpd_resp_set_type(req, "text/plain");
-    httpd_resp_set_hdr(req, "Connection", "close");
+static void make_etag(char *etag, size_t etag_len) {
+    const esp_app_desc_t *desc = esp_app_get_description();
 
-    return httpd_resp_sendstr(req, "Hello from ESP32");
+    snprintf(etag, etag_len, "\"%02x%02x%02x%02x%02x%02x%02x%02x\"", desc->app_elf_sha256[0], desc->app_elf_sha256[1],
+             desc->app_elf_sha256[2], desc->app_elf_sha256[3], desc->app_elf_sha256[4], desc->app_elf_sha256[5],
+             desc->app_elf_sha256[6], desc->app_elf_sha256[7]);
+}
+
+//  Handler to redirect incoming GET request for /index.html to /
+static esp_err_t index_html_get_handler(httpd_req_t *req) {
+    httpd_resp_set_status(req, "307 Temporary Redirect");
+    httpd_resp_set_hdr(req, "Location", "/");
+    httpd_resp_send(req, NULL, 0); // Response body can be empty
+    return ESP_OK;
+}
+
+static esp_err_t root_get_handler(httpd_req_t *req) {
+
+    httpd_resp_set_hdr(req, "ETag", s_etag);
+
+    // Проверяем If-None-Match
+    char if_none_match[32];
+    if (httpd_req_get_hdr_value_str(req, "If-None-Match", if_none_match, sizeof(if_none_match)) == ESP_OK) {
+        if (strcmp(if_none_match, s_etag) == 0) {
+            httpd_resp_set_status(req, "304 Not Modified");
+            return httpd_resp_send(req, NULL, 0);
+        }
+    }
+
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    httpd_resp_set_hdr(req, "Connection", "close");
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache, must-revalidate");
+
+    // "no-cache, must-revalidate" - for dynamic content
+    // "public, max-age=300, s-maxage=86400, stale-while-revalidate=300, stale-if-error=3600" - for static files behind
+    // "public, max-age=31536000, immutable" - for versioned static files
+
+    extern const unsigned char index_html_start[] asm("_binary_index_html_gz_start");
+    extern const unsigned char index_html_end[] asm("_binary_index_html_gz_end");
+    const size_t index_html_size = (index_html_end - index_html_start);
+
+    return httpd_resp_send(req, (const char *)index_html_start, index_html_size);
 }
 
 static esp_err_t stop_webserver() {
@@ -128,7 +169,7 @@ static esp_err_t stop_webserver() {
 static esp_err_t start_webserver() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
 
-    config.server_port = 8001;
+    // config.server_port = 8080;
 
     config.lru_purge_enable = true;
     config.max_open_sockets = 4;
@@ -148,8 +189,12 @@ static esp_err_t start_webserver() {
     DEFER(stop_webserver);
 
     static const httpd_uri_t root_uri = {.uri = "/", .method = HTTP_GET, .handler = root_get_handler};
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &root_uri), TAG, "httpd_register_uri_handler failed");
 
-    httpd_register_uri_handler(s_server, &root_uri);
+    static const httpd_uri_t index_html_uri = {
+        .uri = "/index.html", .method = HTTP_GET, .handler = index_html_get_handler};
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &index_html_uri), TAG,
+                        "httpd_register_uri_handler failed");
 
     return ESP_OK;
 }
@@ -166,6 +211,9 @@ static esp_err_t app_logic() {
 
 void app_main(void) {
     ESP_ERROR_CHECK(closer_create(&s_closer));
+
+    make_etag(s_etag, sizeof(s_etag));
+    ESP_LOGI(TAG, "ETag: %s", s_etag);
 
     app_logic();
 

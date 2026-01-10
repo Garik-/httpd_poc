@@ -1,5 +1,5 @@
 import { readFileSync, writeFileSync, statSync } from 'node:fs'
-import { brotliCompressSync, constants } from 'node:zlib'
+import { brotliCompressSync, constants, gzipSync } from 'node:zlib'
 import { resolve } from 'node:path'
 
 const file = resolve('dist/index.html')
@@ -15,6 +15,11 @@ const brotliFile = file + '.br'
 writeFileSync(brotliFile, brotli)
 const brotliSize = brotli.length
 
+const gzip = gzipSync(input, { level: 9 })
+const gzipFile = file + '.gz'
+writeFileSync(gzipFile, gzip)
+const gzipSize = gzip.length
+
 const ratio = (orig, compressed) =>
   (((orig - compressed) / orig) * 100).toFixed(2) + ' %'
 
@@ -27,5 +32,9 @@ console.table({
   brotli: {
     size: brotliSize,
     compression: ratio(originalSize, brotliSize)
-  }
+  },
+   gzip: {
+    size: gzipSize,
+    compression: ratio(originalSize, gzipSize)
+  },
 })
