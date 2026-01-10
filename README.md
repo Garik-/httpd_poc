@@ -1,9 +1,9 @@
 # httpd PoC
 
-PoC of a web server project with a compressed static web engine
+PoC of a esp32 web server project with a compressed static web engine
 
 ## Requirements
-node v25.2.1
+node v25.2.1  
 esp-idf v5.5.2
 
 ## Remark
