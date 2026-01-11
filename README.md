@@ -1,6 +1,8 @@
-# httpd PoC
+# HTTPd PoC
 
 PoC of a esp-idf http server project with a compressed static web engine
+
+![screenshot](screenshot.png)
 
 ## Requirements
 node v25.2.1  
