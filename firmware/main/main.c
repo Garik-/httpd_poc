@@ -15,7 +15,7 @@
 #define LED_PIN GPIO_NUM_8
 #define LED_BLINK_INTERVAL pdMS_TO_TICKS(512)
 
-#define WAIT_STA_GOT_IP_MAX pdMS_TO_TICKS(5000)
+#define WAIT_STA_GOT_IP_MAX pdMS_TO_TICKS(10000) // TODO: make configurable
 
 #define GPIO_OUTPUT_PIN_SEL ((1ULL << LED_PIN))
 
@@ -45,14 +45,23 @@ static esp_err_t gpio_init() {
     return gpio_config(&io_conf);
 }
 
-static esp_err_t blink_task() {
-    for (;;) {
-        ESP_RETURN_ON_ERROR(gpio_set_level(LED_PIN, 1), TAG, "failed to turn on LED");
-        vTaskDelay(LED_BLINK_INTERVAL);
-        ESP_RETURN_ON_ERROR(gpio_set_level(LED_PIN, 0), TAG, "failed to turn off LED");
-        vTaskDelay(LED_BLINK_INTERVAL);
+static esp_err_t api_led_set_level(httpd_req_t *req, uint32_t level) {
+    esp_err_t err = gpio_set_level(LED_PIN, level);
+
+    if (unlikely(err != ESP_OK)) {
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
     }
-    return ESP_OK;
+
+    httpd_resp_set_hdr(req, "Connection", "close");
+    return httpd_resp_send(req, NULL, 0);
+}
+
+static esp_err_t api_led_post_on_handler(httpd_req_t *req) {
+    return api_led_set_level(req, 0);
+}
+
+static esp_err_t api_led_post_off_handler(httpd_req_t *req) {
+    return api_led_set_level(req, 1);
 }
 
 static esp_err_t delete_default_wifi_driver_and_handlers() {
@@ -281,6 +290,16 @@ static esp_err_t start_webserver() {
     ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &index_html_uri), TAG,
                         "httpd_register_uri_handler failed");
 
+    static const httpd_uri_t api_led_post_on = {
+        .uri = "/api/led/on", .method = HTTP_POST, .handler = api_led_post_on_handler};
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &api_led_post_on), TAG,
+                        "httpd_register_uri_handler failed");
+
+    static const httpd_uri_t api_led_post_off = {
+        .uri = "/api/led/off", .method = HTTP_POST, .handler = api_led_post_off_handler};
+    ESP_RETURN_ON_ERROR(httpd_register_uri_handler(s_server, &api_led_post_off), TAG,
+                        "httpd_register_uri_handler failed");
+
     return ESP_OK;
 }
 
@@ -304,21 +323,24 @@ static esp_err_t app_logic() {
     ESP_LOGI(TAG, "ETag: %s", s_etag);
 
     ESP_RETURN_ON_ERROR(gpio_init(), TAG, "GPIO init failed");
+    ESP_RETURN_ON_ERROR(gpio_set_level(LED_PIN, 1), TAG, "gpio_set_level failed"); // LED off
+
     ESP_RETURN_ON_ERROR(nvs_init(), TAG, "NVS init failed");
     ESP_RETURN_ON_ERROR(wifi_init(), TAG, "WiFi init failed");
-    ESP_RETURN_ON_ERROR(wifi_connect(), TAG,
-                        "WiFi connect failed"); // TODO: надо ждать получения IP адреса по хорошему
+    ESP_RETURN_ON_ERROR(wifi_connect(), TAG, "WiFi connect failed");
     ESP_RETURN_ON_ERROR(mdns_start(), TAG, "mDNS init failed");
     ESP_RETURN_ON_ERROR(start_webserver(), TAG, "start webserver failed");
 
-    return blink_task(); // TODO: need graceful shutdown
+    return ESP_OK;
 }
 
 void app_main(void) {
     ESP_ERROR_CHECK(closer_create(&s_closer));
 
-    app_logic();
-
-    closer_close(s_closer);
-    closer_destroy(s_closer);
+    esp_err_t err = app_logic();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "application error: %s", esp_err_to_name(err));
+        closer_close(s_closer);
+        closer_destroy(s_closer);
+    }
 }
