@@ -9,6 +9,7 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "mdns.h"
 #include "nvs_flash.h"
 
 #define LED_PIN GPIO_NUM_8
@@ -199,7 +200,7 @@ static esp_err_t stop_webserver() {
 static esp_err_t start_webserver() {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
 
-    // config.server_port = 8080;
+    config.server_port = CONFIG_HTTPD_HTTP_PORT;
 
     config.lru_purge_enable = true;
     config.max_open_sockets = 4;
@@ -229,6 +230,21 @@ static esp_err_t start_webserver() {
     return ESP_OK;
 }
 
+static esp_err_t mdns_start() {
+    ESP_RETURN_ON_ERROR(mdns_init(), TAG, "mdns_init failed");
+    DEFER(mdns_free);
+
+    ESP_RETURN_ON_ERROR(mdns_hostname_set(CONFIG_HTTPD_MDNS_NAME), TAG, "mdns_hostname_set failed");
+    ESP_LOGI(TAG, "mdns hostname set to: [%s]", CONFIG_HTTPD_MDNS_NAME);
+
+    ESP_RETURN_ON_ERROR(mdns_instance_name_set("ESP32 with mDNS"), TAG,
+                        "mdns_instance_name_set failed"); // TODO: make configurable
+    ESP_RETURN_ON_ERROR(mdns_service_add(NULL, "_http", "_tcp", CONFIG_HTTPD_HTTP_PORT, NULL, 0), TAG,
+                        "mdns_service_add failed");
+
+    return ESP_OK;
+}
+
 static esp_err_t app_logic() {
     ESP_RETURN_ON_ERROR(make_etag(s_etag, sizeof(s_etag)), TAG, "make_etag failed");
     ESP_LOGI(TAG, "ETag: %s", s_etag);
@@ -236,7 +252,8 @@ static esp_err_t app_logic() {
     ESP_RETURN_ON_ERROR(gpio_init(), TAG, "GPIO init failed");
     ESP_RETURN_ON_ERROR(nvs_init(), TAG, "NVS init failed");
     ESP_RETURN_ON_ERROR(wifi_init(), TAG, "WiFi init failed");
-    ESP_RETURN_ON_ERROR(wifi_connect(), TAG, "WiFi connect failed");
+    ESP_RETURN_ON_ERROR(wifi_connect(), TAG, "WiFi connect failed"); // TODO: надо ждать получения IP адреса по хорошему
+    ESP_RETURN_ON_ERROR(mdns_start(), TAG, "mDNS init failed");
     ESP_RETURN_ON_ERROR(start_webserver(), TAG, "start webserver failed");
 
     return blink_task(); // TODO: need graceful shutdown
