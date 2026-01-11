@@ -52,7 +52,6 @@ static esp_err_t api_led_set_level(httpd_req_t *req, uint32_t level) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
     }
 
-    httpd_resp_set_hdr(req, "Connection", "close");
     return httpd_resp_send(req, NULL, 0);
 }
 
@@ -238,7 +237,6 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
     }
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    httpd_resp_set_hdr(req, "Connection", "close");
     httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, must-revalidate");
 
@@ -268,15 +266,15 @@ static esp_err_t start_webserver() {
     config.lru_purge_enable = true;
     config.max_open_sockets = 4;
 
-    config.recv_wait_timeout = 5;
-    config.send_wait_timeout = 5;
+    config.recv_wait_timeout = 10;
+    config.send_wait_timeout = 10;
 
-    config.keep_alive_enable = false;
+    config.keep_alive_enable = true;
 
-    config.stack_size = 4096;
+    config.stack_size = 6144;
     config.max_uri_handlers = 8;
 
-    config.task_priority = tskIDLE_PRIORITY + 2;
+    config.task_priority = tskIDLE_PRIORITY + 3;
 
     ESP_LOGI(TAG, "starting server on port: '%d'", config.server_port);
     ESP_RETURN_ON_ERROR(httpd_start(&s_server, &config), TAG, "httpd_start failed");
