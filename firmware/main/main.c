@@ -15,6 +15,8 @@
 #define LED_PIN GPIO_NUM_8
 #define LED_BLINK_INTERVAL pdMS_TO_TICKS(512)
 
+#define WAIT_STA_GOT_IP_MAX pdMS_TO_TICKS(5000)
+
 #define GPIO_OUTPUT_PIN_SEL ((1ULL << LED_PIN))
 
 static const char *TAG = "httpd_poc";
@@ -27,6 +29,8 @@ static closer_handle_t s_closer = NULL;
 
 static esp_netif_t *s_sta_netif = NULL;
 static httpd_handle_t s_server = NULL;
+
+static TaskHandle_t xTaskToNotify = NULL;
 
 #define ETAG_LEN 24
 static char s_etag[ETAG_LEN];
@@ -116,6 +120,29 @@ static esp_err_t nvs_init() {
     return ret;
 }
 
+static void handler_on_sta_got_ip(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
+    ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+    if (event->esp_netif != s_sta_netif) {
+        ESP_LOGW(TAG, "Got IP event for unknown netif");
+        return;
+    }
+
+    ESP_LOGI(TAG, "Got IPv4 event, address: " IPSTR, IP2STR(&event->ip_info.ip));
+
+    TaskHandle_t to_notify = __atomic_load_n(&xTaskToNotify, __ATOMIC_SEQ_CST);
+    if (to_notify) {
+        if (xPortInIsrContext()) {
+            BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+            xTaskNotifyFromISR(to_notify, 0, eSetValueWithOverwrite, &xHigherPriorityTaskWoken);
+            if (xHigherPriorityTaskWoken) {
+                portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+            }
+        } else {
+            xTaskNotify(to_notify, 0, eSetValueWithOverwrite);
+        }
+    }
+}
+
 static esp_err_t wifi_connect() {
     wifi_config_t wifi_config = {
         .sta =
@@ -128,7 +155,34 @@ static esp_err_t wifi_connect() {
     ESP_LOGI(TAG, "Connecting to %s...", wifi_config.sta.ssid);
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wifi_config), TAG, "esp_wifi_set_config failed");
 
-    return esp_wifi_connect();
+    __atomic_store_n(&xTaskToNotify, xTaskGetCurrentTaskHandle(), __ATOMIC_SEQ_CST);
+
+    ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &handler_on_sta_got_ip, NULL), TAG,
+                        "esp_event_handler_register failed");
+
+    esp_err_t err = esp_wifi_connect();
+
+    if (err != ESP_OK) {
+        goto cleanup;
+    }
+
+    ESP_LOGI(TAG, "Waiting for IP address...");
+
+    if (xTaskNotifyWait(pdFALSE, ULONG_MAX, NULL, WAIT_STA_GOT_IP_MAX) != pdPASS) {
+        err = ESP_ERR_TIMEOUT;
+        ESP_LOGW(TAG, "No ip received within the timeout period");
+
+        goto cleanup;
+    }
+
+    err = ESP_OK;
+
+cleanup:
+
+    esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &handler_on_sta_got_ip); // TODO: спорно
+    __atomic_store_n(&xTaskToNotify, NULL, __ATOMIC_SEQ_CST);
+
+    return err;
 }
 
 static esp_err_t make_etag(char *etag, size_t etag_len) {
@@ -180,8 +234,8 @@ static esp_err_t root_get_handler(httpd_req_t *req) {
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache, must-revalidate");
 
     // "no-cache, must-revalidate" - for dynamic content
-    // "public, max-age=300, s-maxage=86400, stale-while-revalidate=300, stale-if-error=3600" - for static files behind
-    // "public, max-age=31536000, immutable" - for versioned static files
+    // "public, max-age=300, s-maxage=86400, stale-while-revalidate=300, stale-if-error=3600" - for static files
+    // behind "public, max-age=31536000, immutable" - for versioned static files
 
     extern const unsigned char index_html_start[] asm("_binary_index_html_gz_start");
     extern const unsigned char index_html_end[] asm("_binary_index_html_gz_end");
@@ -252,7 +306,8 @@ static esp_err_t app_logic() {
     ESP_RETURN_ON_ERROR(gpio_init(), TAG, "GPIO init failed");
     ESP_RETURN_ON_ERROR(nvs_init(), TAG, "NVS init failed");
     ESP_RETURN_ON_ERROR(wifi_init(), TAG, "WiFi init failed");
-    ESP_RETURN_ON_ERROR(wifi_connect(), TAG, "WiFi connect failed"); // TODO: надо ждать получения IP адреса по хорошему
+    ESP_RETURN_ON_ERROR(wifi_connect(), TAG,
+                        "WiFi connect failed"); // TODO: надо ждать получения IP адреса по хорошему
     ESP_RETURN_ON_ERROR(mdns_start(), TAG, "mDNS init failed");
     ESP_RETURN_ON_ERROR(start_webserver(), TAG, "start webserver failed");
 
