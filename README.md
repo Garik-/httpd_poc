@@ -8,6 +8,9 @@ PoC of a esp-idf http server project with a compressed static web engine
 node v25.2.1  
 esp-idf v5.5.2
 
+![screenshot](esp32c3-super-mini.png)
+*ESP32-C3 Super Mini*
+
 ## Remark
 Before starting the build, configure the esp-idf project.
 
